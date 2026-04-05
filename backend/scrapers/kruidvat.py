@@ -20,8 +20,22 @@ from scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 HOMEPAGE_URL = "https://www.kruidvat.nl"
-API_URL = "https://www.kruidvat.nl/api/2.0/products/search"
-SEARCH_URL = "https://www.kruidvat.nl/zoeken"
+
+# API-varianten (geprobeerd op volgorde tot één werkt)
+API_CANDIDATES = [
+    "https://www.kruidvat.nl/api/2.0/products/search",
+    "https://www.kruidvat.nl/rest/v2/kruidvat/products/search",
+    "https://www.kruidvat.nl/api/v2/kruidvat/products/search",
+]
+
+# Zoekpagina-varianten (geprobeerd op volgorde tot één 200 geeft)
+SEARCH_CANDIDATES = [
+    ("https://www.kruidvat.nl/zoeken", "text"),   # SAP Commerce standaard
+    ("https://www.kruidvat.nl/zoeken", "q"),
+    ("https://www.kruidvat.nl/search", "q"),
+    ("https://www.kruidvat.nl/search", "text"),
+    ("https://www.kruidvat.nl/nl/zoeken", "q"),
+]
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -102,40 +116,52 @@ class KruidvatScraper(BaseScraper):
     async def _try_api(self, query: str, category_slug: str) -> list[ProductScraped]:
         client = await self._get_client()
         results = []
-        page = 0
 
+        # Probeer API-kandidaten totdat één werkt
+        working_url = None
+        for candidate in API_CANDIDATES:
+            try:
+                probe = await client.get(
+                    candidate,
+                    params={"query": query, "pageSize": 1, "lang": "nl", "curr": "EUR"},
+                    headers={
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-anonymous-consumerid": "kruidvat-web",
+                    },
+                )
+                if probe.status_code == 200:
+                    working_url = candidate
+                    logger.info("Kruidvat: werkende API gevonden: %s", candidate)
+                    break
+                else:
+                    logger.debug("Kruidvat API %s → %d", candidate, probe.status_code)
+            except httpx.RequestError as e:
+                logger.debug("Kruidvat API probe mislukt %s: %s", candidate, e)
+
+        if not working_url:
+            logger.info("Kruidvat: geen werkende API-URL gevonden, schakel over naar HTML")
+            return []
+
+        page = 0
         while page <= 2:
             await self._delay()
             try:
                 resp = await client.get(
-                    API_URL,
-                    params={
-                        "query": query,
-                        "pageSize": 24,
-                        "currentPage": page,
-                        "lang": "nl",
-                        "curr": "EUR",
-                    },
+                    working_url,
+                    params={"query": query, "pageSize": 24, "currentPage": page, "lang": "nl", "curr": "EUR"},
                     headers={
                         "Accept": "application/json, text/javascript, */*; q=0.01",
                         "X-Requested-With": "XMLHttpRequest",
-                        "Referer": f"{SEARCH_URL}?q={query}",
                         "x-anonymous-consumerid": "kruidvat-web",
                     },
                 )
+                resp.raise_for_status()
             except httpx.RequestError as e:
                 logger.error("Kruidvat API verbindingsfout: %s: %s", type(e).__name__, e)
                 break
-
-            if resp.status_code == 403:
-                logger.warning(
-                    "Kruidvat API geeft 403 voor '%s' (sessie-cookies niet geaccepteerd), "
-                    "schakel over naar HTML-scraping",
-                    query,
-                )
-                break
-            if resp.status_code != 200:
-                logger.warning("Kruidvat API status %d voor '%s'", resp.status_code, query)
+            except httpx.HTTPStatusError as e:
+                logger.warning("Kruidvat API status %d voor '%s'", e.response.status_code, query)
                 break
 
             try:
@@ -149,8 +175,7 @@ class KruidvatScraper(BaseScraper):
 
             for p in products_list:
                 try:
-                    parsed = self._parse_api_product(p, category_slug)
-                    results.append(parsed)
+                    results.append(self._parse_api_product(p, category_slug))
                 except Exception as e:
                     logger.debug("Kruidvat API parse fout: %s", e)
 
@@ -163,21 +188,25 @@ class KruidvatScraper(BaseScraper):
 
     async def _scrape_html(self, query: str, category_slug: str) -> list[ProductScraped]:
         client = await self._get_client()
-        try:
-            resp = await client.get(
-                SEARCH_URL,
-                params={"q": query},
-                headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.9"},
-            )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            logger.error("Kruidvat HTML fout voor '%s': status %d", query, e.response.status_code)
-            return []
-        except httpx.RequestError as e:
-            logger.error("Kruidvat HTML verbindingsfout: %s: %s", type(e).__name__, e)
-            return []
 
-        return self._extract_from_html(resp.text, category_slug)
+        # Probeer zoekpagina-kandidaten totdat één 200 geeft
+        for base_url, param_name in SEARCH_CANDIDATES:
+            try:
+                resp = await client.get(
+                    base_url,
+                    params={param_name: query},
+                    headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.9"},
+                )
+                if resp.status_code == 200:
+                    logger.info("Kruidvat: werkende zoek-URL: %s?%s=%s", base_url, param_name, query)
+                    return self._extract_from_html(resp.text, category_slug)
+                else:
+                    logger.debug("Kruidvat HTML %s?%s= → %d", base_url, param_name, resp.status_code)
+            except httpx.RequestError as e:
+                logger.debug("Kruidvat HTML probe mislukt %s: %s", base_url, e)
+
+        logger.warning("Kruidvat: geen werkende zoek-URL gevonden voor '%s'", query)
+        return []
 
     def _extract_from_html(self, html: str, category_slug: str) -> list[ProductScraped]:
         soup = BeautifulSoup(html, "lxml")
