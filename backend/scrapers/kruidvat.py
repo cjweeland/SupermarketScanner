@@ -148,9 +148,14 @@ class KruidvatScraper(BaseScraper):
                 if products:
                     logger.info("Kruidvat: %d producten gevonden voor '%s'", len(products), query)
                 else:
+                    # Sla debug-HTML op zodat we de structuur kunnen inspecteren
+                    import tempfile, os
+                    debug_path = os.path.join(tempfile.gettempdir(), f"kruidvat_debug_{query[:20].replace(' ','_')}.html")
+                    with open(debug_path, "w", encoding="utf-8") as f:
+                        f.write(html)
                     logger.warning(
-                        "Kruidvat: 0 producten voor '%s' — huidige URL: %s",
-                        query, page.url,
+                        "Kruidvat: 0 producten voor '%s' — URL: %s — debug HTML opgeslagen in: %s",
+                        query, page.url, debug_path,
                     )
 
                 for p in products:
@@ -164,6 +169,21 @@ class KruidvatScraper(BaseScraper):
     def _extract_from_html(self, html: str, category_slug: str) -> list[ProductScraped]:
         soup = BeautifulSoup(html, "lxml")
         results = []
+
+        # 0. __NEXT_DATA__ (Next.js embedded state — meest betrouwbaar)
+        next_script = soup.find("script", id="__NEXT_DATA__")
+        if next_script:
+            try:
+                next_data = json.loads(next_script.string or "")
+                products_raw = self._find_products_in_obj(next_data)
+                for p in products_raw:
+                    parsed = self._parse_next_product(p, category_slug)
+                    if parsed:
+                        results.append(parsed)
+                if results:
+                    return results
+            except (json.JSONDecodeError, AttributeError):
+                pass
 
         # 1. JSON-LD structured data
         for script in soup.find_all("script", type="application/ld+json"):
@@ -219,6 +239,109 @@ class KruidvatScraper(BaseScraper):
                     pass
 
         return results
+
+    def _find_products_in_obj(self, data, depth: int = 0) -> list[dict]:
+        """Recursief zoeken naar een lijst van producten in een JSON-object."""
+        if depth > 12:
+            return []
+        if isinstance(data, dict):
+            # Zoek naar lijsten met product-achtige objecten
+            for key in ("products", "items", "results", "searchResults", "productList", "hits"):
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    first = val[0]
+                    if isinstance(first, dict) and any(
+                        k in first for k in ("name", "title", "productName", "ean", "sku", "price")
+                    ):
+                        return val
+            for v in data.values():
+                r = self._find_products_in_obj(v, depth + 1)
+                if r:
+                    return r
+        elif isinstance(data, list):
+            for item in data:
+                r = self._find_products_in_obj(item, depth + 1)
+                if r:
+                    return r
+        return []
+
+    def _parse_next_product(self, p: dict, category_slug: str) -> Optional[ProductScraped]:
+        name = (
+            p.get("name") or p.get("title") or p.get("productName") or
+            p.get("displayName") or ""
+        )
+        if not name:
+            return None
+
+        product_id = str(
+            p.get("id") or p.get("sku") or p.get("code") or
+            p.get("ean") or p.get("productId") or name[:50]
+        )
+
+        # Prijs — diverse mogelijke structuren
+        price_cents = 0
+        for price_key in ("price", "currentPrice", "salesPrice", "priceData"):
+            price_val = p.get(price_key)
+            if price_val is None:
+                continue
+            if isinstance(price_val, dict):
+                raw = (
+                    price_val.get("value") or price_val.get("amount") or
+                    price_val.get("formattedValue") or price_val.get("price") or 0
+                )
+            else:
+                raw = price_val
+            try:
+                price_cents = round(float(str(raw).replace(",", ".").replace("€", "").strip()) * 100)
+                if price_cents > 0:
+                    break
+            except (ValueError, TypeError):
+                pass
+
+        # Promo
+        promotion = None
+        for promo_key in ("promotions", "promotion", "badge", "badges"):
+            promo_val = p.get(promo_key)
+            if not promo_val:
+                continue
+            if isinstance(promo_val, list) and promo_val:
+                promo_val = promo_val[0]
+            if isinstance(promo_val, dict):
+                desc = promo_val.get("description") or promo_val.get("text") or promo_val.get("label")
+                if desc:
+                    promotion = PromoScraped(promo_type="promotion", description=str(desc))
+                    break
+            elif isinstance(promo_val, str) and promo_val:
+                promotion = PromoScraped(promo_type="promotion", description=promo_val)
+                break
+
+        # Afbeelding
+        image_url = p.get("imageUrl") or p.get("image") or p.get("thumbnail")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url") or image_url.get("src")
+        if image_url and not str(image_url).startswith("http"):
+            image_url = HOMEPAGE_URL + str(image_url)
+
+        # URL
+        url = p.get("url") or p.get("pdpUrl") or p.get("slug")
+        if url and not str(url).startswith("http"):
+            url = HOMEPAGE_URL + str(url)
+
+        # Hoeveelheid
+        size = p.get("unitSize") or p.get("packageSize") or p.get("contentQuantity") or p.get("size") or ""
+
+        return ProductScraped(
+            store_slug=self.store_slug,
+            store_product_id=product_id,
+            name=str(name),
+            brand=p.get("brand") or p.get("brandName"),
+            category_slug=category_slug,
+            image_url=str(image_url) if image_url else None,
+            url=str(url) if url else None,
+            quantity_unit=str(size) if size else None,
+            price_cents=price_cents,
+            promotion=promotion,
+        )
 
     def _parse_jsonld(self, item: dict, category_slug: str) -> Optional[ProductScraped]:
         name = item.get("name", "")
