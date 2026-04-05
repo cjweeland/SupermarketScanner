@@ -1,17 +1,13 @@
 """
 Kruidvat scraper.
-Strategie:
-1. Bezoek homepage om sessie-cookies op te halen
-2. Probeer de REST API met die cookies
-3. Fallback: scrape zoekpagina HTML met JSON-LD extractie
-4. Laatste redmiddel: Playwright
+Kruidvat blokkeert directe HTTP-requests (403 op alle endpoints).
+Playwright is de primaire methode; JSON-LD extractie uit de gerenderde pagina.
 """
 import json
 import logging
 from datetime import datetime
 from typing import AsyncIterator, Optional
 
-import httpx
 from bs4 import BeautifulSoup
 
 from models.schemas import ProductScraped, PromoScraped
@@ -21,38 +17,12 @@ logger = logging.getLogger(__name__)
 
 HOMEPAGE_URL = "https://www.kruidvat.nl"
 
-# API-varianten (geprobeerd op volgorde tot één werkt)
-API_CANDIDATES = [
-    "https://www.kruidvat.nl/api/2.0/products/search",
-    "https://www.kruidvat.nl/rest/v2/kruidvat/products/search",
-    "https://www.kruidvat.nl/api/v2/kruidvat/products/search",
-]
-
-# Zoekpagina-varianten (geprobeerd op volgorde tot één 200 geeft)
+# Zoekpagina-kandidaten — Playwright probeert ze op volgorde
 SEARCH_CANDIDATES = [
-    ("https://www.kruidvat.nl/zoeken", "text"),   # SAP Commerce standaard
+    ("https://www.kruidvat.nl/zoeken", "text"),
     ("https://www.kruidvat.nl/zoeken", "q"),
     ("https://www.kruidvat.nl/search", "q"),
-    ("https://www.kruidvat.nl/search", "text"),
-    ("https://www.kruidvat.nl/nl/zoeken", "q"),
 ]
-
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-dest": "empty",
-}
 
 
 class KruidvatScraper(BaseScraper):
@@ -61,158 +31,112 @@ class KruidvatScraper(BaseScraper):
 
     def __init__(self, request_delay_ms: int = 500):
         super().__init__(request_delay_ms)
-        self._client: Optional[httpx.AsyncClient] = None
-        self._session_ready = False
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            # httpx bewaart cookies automatisch via cookiejar
-            self._client = httpx.AsyncClient(
-                headers={
-                    **BROWSER_HEADERS,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                },
-                timeout=20,
-                follow_redirects=True,
-            )
-            self._session_ready = False
-        return self._client
-
-    async def _ensure_session(self) -> None:
-        """Bezoek de homepage om sessie-cookies op te halen."""
-        if self._session_ready:
-            return
-        client = await self._get_client()
-        try:
-            resp = await client.get(HOMEPAGE_URL)
-            resp.raise_for_status()
-            self._session_ready = True
-            logger.debug("Kruidvat: sessie-cookies opgehaald (%d cookies)", len(client.cookies))
-        except Exception as e:
-            logger.warning("Kruidvat: homepage bezoek mislukt: %s: %s", type(e).__name__, e)
 
     async def search(self, query: str, category_slug: str) -> AsyncIterator[ProductScraped]:
-        await self._ensure_session()
         await self._delay()
+        async for product in self._playwright_search(query, category_slug):
+            yield product
 
-        # Stap 1: probeer de REST API
-        products = await self._try_api(query, category_slug)
-
-        # Stap 2: HTML-scraping van de zoekpagina
-        if not products:
-            logger.info("Kruidvat: API leverde niets op voor '%s', probeer HTML-scraping", query)
-            products = await self._scrape_html(query, category_slug)
-
-        # Stap 3: Playwright fallback
-        if not products:
-            logger.info("Kruidvat: HTML leverde niets op voor '%s', probeer Playwright", query)
-            async for p in self._playwright_fallback(query, category_slug):
-                yield p
+    async def _playwright_search(self, query: str, category_slug: str) -> AsyncIterator[ProductScraped]:
+        try:
+            from playwright.async_api import async_playwright
+            from config import settings
+        except ImportError:
+            logger.error("Playwright niet beschikbaar voor Kruidvat scraper")
             return
 
-        for p in products:
-            yield p
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=settings.playwright_headless)
+            context = await browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="nl-NL",
+                viewport={"width": 1280, "height": 800},
+            )
 
-    async def _try_api(self, query: str, category_slug: str) -> list[ProductScraped]:
-        client = await self._get_client()
-        results = []
-
-        # Probeer API-kandidaten totdat één werkt
-        working_url = None
-        for candidate in API_CANDIDATES:
+            # Cookie-melding accepteren via homepage
+            page = await context.new_page()
             try:
-                probe = await client.get(
-                    candidate,
-                    params={"query": query, "pageSize": 1, "lang": "nl", "curr": "EUR"},
-                    headers={
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "x-anonymous-consumerid": "kruidvat-web",
-                    },
-                )
-                if probe.status_code == 200:
-                    working_url = candidate
-                    logger.info("Kruidvat: werkende API gevonden: %s", candidate)
-                    break
-                else:
-                    logger.debug("Kruidvat API %s → %d", candidate, probe.status_code)
-            except httpx.RequestError as e:
-                logger.debug("Kruidvat API probe mislukt %s: %s", candidate, e)
+                await page.goto(HOMEPAGE_URL, wait_until="domcontentloaded", timeout=20000)
+                # Accepteer cookie-banner als die er is
+                for selector in [
+                    "button[id*='accept']",
+                    "button[class*='accept']",
+                    "#onetrust-accept-btn-handler",
+                    "button:has-text('Accepteer')",
+                    "button:has-text('Akkoord')",
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=2000):
+                            await btn.click()
+                            logger.debug("Kruidvat: cookie-banner geaccepteerd")
+                            break
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.debug("Kruidvat: homepage laden mislukt (niet kritiek): %s", e)
 
-        if not working_url:
-            logger.info("Kruidvat: geen werkende API-URL gevonden, schakel over naar HTML")
-            return []
-
-        page = 0
-        while page <= 2:
-            await self._delay()
-            try:
-                resp = await client.get(
-                    working_url,
-                    params={"query": query, "pageSize": 24, "currentPage": page, "lang": "nl", "curr": "EUR"},
-                    headers={
-                        "Accept": "application/json, text/javascript, */*; q=0.01",
-                        "X-Requested-With": "XMLHttpRequest",
-                        "x-anonymous-consumerid": "kruidvat-web",
-                    },
-                )
-                resp.raise_for_status()
-            except httpx.RequestError as e:
-                logger.error("Kruidvat API verbindingsfout: %s: %s", type(e).__name__, e)
-                break
-            except httpx.HTTPStatusError as e:
-                logger.warning("Kruidvat API status %d voor '%s'", e.response.status_code, query)
-                break
-
-            try:
-                data = resp.json()
-            except Exception:
-                break
-
-            products_list = data.get("products", [])
-            if not products_list:
-                break
-
-            for p in products_list:
+            # Zoek de juiste zoek-URL
+            search_url = None
+            search_param = "text"
+            for base_url, param in SEARCH_CANDIDATES:
                 try:
-                    results.append(self._parse_api_product(p, category_slug))
+                    resp = await page.goto(
+                        f"{base_url}?{param}={query}",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    if resp and resp.status == 200:
+                        search_url = base_url
+                        search_param = param
+                        logger.info("Kruidvat: werkende URL: %s?%s=", base_url, param)
+                        break
+                    else:
+                        logger.debug("Kruidvat: %s?%s= → %s", base_url, param, resp.status if resp else "geen respons")
                 except Exception as e:
-                    logger.debug("Kruidvat API parse fout: %s", e)
+                    logger.debug("Kruidvat: URL-kandidaat mislukt %s: %s", base_url, e)
 
-            pagination = data.get("pagination", {})
-            if page + 1 >= pagination.get("totalPages", 1):
-                break
-            page += 1
+            if not search_url:
+                logger.error("Kruidvat: geen werkende zoek-URL gevonden voor '%s'", query)
+                await browser.close()
+                return
 
-        return results
-
-    async def _scrape_html(self, query: str, category_slug: str) -> list[ProductScraped]:
-        client = await self._get_client()
-
-        # Probeer zoekpagina-kandidaten totdat één 200 geeft
-        for base_url, param_name in SEARCH_CANDIDATES:
+            # Wacht op producten en extraheer
             try:
-                resp = await client.get(
-                    base_url,
-                    params={param_name: query},
-                    headers={"Accept": "text/html,application/xhtml+xml,*/*;q=0.9"},
-                )
-                if resp.status_code == 200:
-                    logger.info("Kruidvat: werkende zoek-URL: %s?%s=%s", base_url, param_name, query)
-                    return self._extract_from_html(resp.text, category_slug)
-                else:
-                    logger.debug("Kruidvat HTML %s?%s= → %d", base_url, param_name, resp.status_code)
-            except httpx.RequestError as e:
-                logger.debug("Kruidvat HTML probe mislukt %s: %s", base_url, e)
+                await page.wait_for_timeout(2000)
+                # Wacht op een productkaart als die zichtbaar wordt
+                for selector in [
+                    "[class*='product-tile']",
+                    "[class*='product-card']",
+                    "article",
+                    "[data-test='product']",
+                ]:
+                    try:
+                        await page.wait_for_selector(selector, timeout=5000)
+                        break
+                    except Exception:
+                        pass
 
-        logger.warning("Kruidvat: geen werkende zoek-URL gevonden voor '%s'", query)
-        return []
+                html = await page.content()
+                products = self._extract_from_html(html, category_slug)
+                logger.info("Kruidvat: %d producten gevonden voor '%s'", len(products), query)
+                for p in products:
+                    yield p
+
+            except Exception as e:
+                logger.error("Kruidvat Playwright extractie fout voor '%s': %s", query, e)
+            finally:
+                await browser.close()
 
     def _extract_from_html(self, html: str, category_slug: str) -> list[ProductScraped]:
         soup = BeautifulSoup(html, "lxml")
         results = []
 
-        # JSON-LD structured data
+        # 1. JSON-LD structured data
         for script in soup.find_all("script", type="application/ld+json"):
             try:
                 data = json.loads(script.string or "")
@@ -236,51 +160,36 @@ class KruidvatScraper(BaseScraper):
         if results:
             return results
 
-        # Inline script met window.__STATE__ of window.__data__
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            if "window.__" in text and "products" in text.lower():
-                import re
-                # Zoek naar een JSON-object na window.__XXX__ =
-                m = re.search(r"window\.__\w+__\s*=\s*(\{.+?\});?\s*(?:</script>|$)", text, re.DOTALL)
-                if m:
-                    try:
-                        state = json.loads(m.group(1))
-                        products = self._find_in_state(state, "products")
-                        for p in (products or []):
-                            parsed = self._parse_state_product(p, category_slug)
-                            if parsed:
-                                results.append(parsed)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-
-        if results:
-            return results
-
-        # HTML product cards (class-based)
+        # 2. HTML product cards
         for card in soup.find_all("article"):
             p = self._parse_html_card(card, category_slug)
             if p:
                 results.append(p)
 
-        return results
+        if not results:
+            # 3. data-product attributen
+            for el in soup.find_all(attrs={"data-product": True}):
+                try:
+                    p_data = json.loads(el["data-product"])
+                    name = p_data.get("name", "")
+                    if not name:
+                        continue
+                    price = p_data.get("price") or p_data.get("currentPrice") or 0
+                    try:
+                        price_cents = round(float(str(price).replace(",", ".")) * 100)
+                    except (ValueError, TypeError):
+                        price_cents = 0
+                    results.append(ProductScraped(
+                        store_slug=self.store_slug,
+                        store_product_id=str(p_data.get("id") or p_data.get("sku") or name[:50]),
+                        name=name,
+                        category_slug=category_slug,
+                        price_cents=price_cents,
+                    ))
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
-    def _find_in_state(self, data, key: str, depth: int = 0) -> Optional[list]:
-        if depth > 8:
-            return None
-        if isinstance(data, dict):
-            if key in data and isinstance(data[key], list):
-                return data[key]
-            for v in data.values():
-                r = self._find_in_state(v, key, depth + 1)
-                if r:
-                    return r
-        elif isinstance(data, list):
-            for item in data:
-                r = self._find_in_state(item, key, depth + 1)
-                if r:
-                    return r
-        return None
+        return results
 
     def _parse_jsonld(self, item: dict, category_slug: str) -> Optional[ProductScraped]:
         name = item.get("name", "")
@@ -303,9 +212,27 @@ class KruidvatScraper(BaseScraper):
         b = item.get("brand")
         if isinstance(b, dict):
             brand = b.get("name")
+        elif b:
+            brand = str(b)
+
+        # Promotie uit offers
+        promotion = None
+        high_price = offer.get("highPrice")
+        low_price = offer.get("lowPrice") or offer.get("price")
+        if high_price and low_price:
+            try:
+                if float(str(high_price)) > float(str(low_price)):
+                    promotion = PromoScraped(
+                        promo_type="sale",
+                        description=f"Was €{high_price}, nu €{low_price}",
+                        promo_price_cents=round(float(str(low_price)) * 100),
+                    )
+            except (ValueError, TypeError):
+                pass
+
         return ProductScraped(
             store_slug=self.store_slug,
-            store_product_id=item.get("sku") or name[:50],
+            store_product_id=item.get("sku") or item.get("productID") or name[:50],
             name=name,
             brand=brand,
             category_slug=category_slug,
@@ -313,35 +240,24 @@ class KruidvatScraper(BaseScraper):
             url=url,
             quantity_unit=item.get("description", "")[:100] or None,
             price_cents=price_cents,
-        )
-
-    def _parse_state_product(self, p: dict, category_slug: str) -> Optional[ProductScraped]:
-        name = p.get("name", "")
-        if not name:
-            return None
-        price_str = (p.get("price", {}) or {}).get("formattedValue", "0")
-        price_cents = self._price_str_to_cents(price_str)
-        url_path = p.get("url", "")
-        url = HOMEPAGE_URL + url_path if url_path else None
-        return ProductScraped(
-            store_slug=self.store_slug,
-            store_product_id=p.get("code") or name[:50],
-            name=name,
-            brand=p.get("manufacturer"),
-            category_slug=category_slug,
-            url=url,
-            price_cents=price_cents,
+            promotion=promotion,
         )
 
     def _parse_html_card(self, card, category_slug: str) -> Optional[ProductScraped]:
-        name_el = card.find(attrs={"data-test": "product-name"}) or \
-                  card.find(class_=lambda c: c and "product-name" in " ".join(c).lower())
+        name_el = (
+            card.find(attrs={"data-test": "product-name"})
+            or card.find(class_=lambda c: c and "product-name" in " ".join(c).lower())
+            or card.find("h3")
+            or card.find("h2")
+        )
         name = name_el.get_text(strip=True) if name_el else ""
         if not name:
             return None
 
-        price_el = card.find(attrs={"data-test": "product-price"}) or \
-                   card.find(class_=lambda c: c and "price" in " ".join(c).lower())
+        price_el = (
+            card.find(attrs={"data-test": "product-price"})
+            or card.find(class_=lambda c: c and "price" in " ".join(c).lower())
+        )
         price_str = price_el.get_text(strip=True) if price_el else "0"
         price_cents = self._price_str_to_cents(price_str)
 
@@ -364,95 +280,16 @@ class KruidvatScraper(BaseScraper):
             price_cents=price_cents,
         )
 
-    def _parse_api_product(self, p: dict, category_slug: str) -> ProductScraped:
-        product_id = p.get("code", "")
-        name = p.get("name", "")
-        price_str = (p.get("price", {}) or {}).get("formattedValue", "0")
-        price_cents = self._price_str_to_cents(price_str)
-
-        promotion = None
-        promos = p.get("potentialPromotions", [])
-        if promos:
-            promo = promos[0]
-            promo_price_str = (promo.get("price", {}) or {}).get("formattedValue")
-            promo_price_cents = self._price_str_to_cents(promo_price_str) if promo_price_str else None
-            valid_until = None
-            end_date = promo.get("endDate")
-            if end_date:
-                try:
-                    valid_until = datetime.fromisoformat(end_date)
-                except ValueError:
-                    pass
-            promotion = PromoScraped(
-                promo_type="promotion",
-                description=promo.get("description", "Aanbieding"),
-                promo_price_cents=promo_price_cents,
-                valid_until=valid_until,
-            )
-
-        images = p.get("images", [])
-        image_url = None
-        for img in images:
-            if img.get("format") == "product":
-                img_url = img.get("url", "")
-                image_url = img_url if img_url.startswith("http") else HOMEPAGE_URL + img_url
-                break
-        if not image_url and images:
-            img_url = images[0].get("url", "")
-            image_url = img_url if img_url.startswith("http") else HOMEPAGE_URL + img_url
-
-        url_path = p.get("url", "")
-        unit_str = f"{p.get('quantity', '')} {p.get('unit', '')}".strip()
-
-        return ProductScraped(
-            store_slug=self.store_slug,
-            store_product_id=product_id,
-            name=name,
-            brand=p.get("manufacturer"),
-            category_slug=category_slug,
-            image_url=image_url,
-            url=HOMEPAGE_URL + url_path if url_path else None,
-            quantity_unit=unit_str if unit_str else None,
-            price_cents=price_cents,
-            promotion=promotion,
-        )
-
-    async def _playwright_fallback(self, query: str, category_slug: str) -> AsyncIterator[ProductScraped]:
+    async def health_check(self) -> bool:
         try:
             from playwright.async_api import async_playwright
             from config import settings
-        except ImportError:
-            logger.error("Playwright niet beschikbaar als fallback voor Kruidvat")
-            return
-
-        logger.info("Kruidvat: Playwright fallback voor '%s'", query)
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=settings.playwright_headless)
-            context = await browser.new_context(
-                user_agent=BROWSER_HEADERS["User-Agent"],
-                locale="nl-NL",
-            )
-            page = await context.new_page()
-            try:
-                await page.goto(f"{SEARCH_URL}?q={query}", wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(2000)
-                html = await page.content()
-                for p in self._extract_from_html(html, category_slug):
-                    yield p
-            except Exception as e:
-                logger.error("Kruidvat Playwright fout voor '%s': %s", query, e)
-            finally:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=settings.playwright_headless)
+                page = await browser.new_page()
+                resp = await page.goto(HOMEPAGE_URL, timeout=15000)
                 await browser.close()
-
-    async def health_check(self) -> bool:
-        try:
-            client = await self._get_client()
-            resp = await client.get(HOMEPAGE_URL)
-            return resp.status_code == 200
+                return resp is not None and resp.status == 200
         except Exception as e:
             logger.warning("Kruidvat health check mislukt: %s", e)
             return False
-
-    async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
