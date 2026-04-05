@@ -46,11 +46,16 @@ class KruidvatScraper(BaseScraper):
             return
 
         # Importeer stealth-plugin (verbergt Playwright-vingerafdruk voor Akamai)
+        stealth_async = None
         try:
-            from playwright_stealth import stealth_async
+            from playwright_stealth import stealth_async  # versie 1.x
         except ImportError:
-            stealth_async = None
-            logger.warning("playwright-stealth niet geïnstalleerd — voer uit: pip install playwright-stealth")
+            try:
+                from playwright_stealth import Stealth  # versie 2.x
+                async def stealth_async(p):
+                    await Stealth().apply_stealth_async(p)
+            except ImportError:
+                logger.warning("playwright-stealth niet beschikbaar (import mislukt) — ga door zonder stealth")
 
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
