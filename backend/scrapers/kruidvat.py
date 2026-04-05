@@ -56,79 +56,108 @@ class KruidvatScraper(BaseScraper):
                 locale="nl-NL",
                 viewport={"width": 1280, "height": 800},
             )
-
-            # Cookie-melding accepteren via homepage
             page = await context.new_page()
+
             try:
-                await page.goto(HOMEPAGE_URL, wait_until="domcontentloaded", timeout=20000)
-                # Accepteer cookie-banner als die er is
+                # Stap 1: open homepage
+                logger.debug("Kruidvat: homepage laden...")
+                await page.goto(HOMEPAGE_URL, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(1500)
+
+                # Stap 2: accepteer cookie-banner
                 for selector in [
-                    "button[id*='accept']",
-                    "button[class*='accept']",
                     "#onetrust-accept-btn-handler",
+                    "button[id*='accept']",
+                    "button:has-text('Accepteer alles')",
                     "button:has-text('Accepteer')",
                     "button:has-text('Akkoord')",
+                    "button:has-text('Alle cookies')",
                 ]:
                     try:
                         btn = page.locator(selector).first
-                        if await btn.is_visible(timeout=2000):
+                        if await btn.is_visible(timeout=1500):
                             await btn.click()
-                            logger.debug("Kruidvat: cookie-banner geaccepteerd")
+                            await page.wait_for_timeout(800)
+                            logger.debug("Kruidvat: cookie-banner geaccepteerd via '%s'", selector)
                             break
                     except Exception:
                         pass
-            except Exception as e:
-                logger.debug("Kruidvat: homepage laden mislukt (niet kritiek): %s", e)
 
-            # Zoek de juiste zoek-URL
-            search_url = None
-            search_param = "text"
-            for base_url, param in SEARCH_CANDIDATES:
-                try:
-                    resp = await page.goto(
-                        f"{base_url}?{param}={query}",
-                        wait_until="domcontentloaded",
-                        timeout=20000,
-                    )
-                    if resp and resp.status == 200:
-                        search_url = base_url
-                        search_param = param
-                        logger.info("Kruidvat: werkende URL: %s?%s=", base_url, param)
-                        break
-                    else:
-                        logger.debug("Kruidvat: %s?%s= → %s", base_url, param, resp.status if resp else "geen respons")
-                except Exception as e:
-                    logger.debug("Kruidvat: URL-kandidaat mislukt %s: %s", base_url, e)
+                # Stap 3: gebruik de zoekbalk op de pagina
+                search_input_selectors = [
+                    "input[type='search']",
+                    "input[name='q']",
+                    "input[name='text']",
+                    "input[placeholder*='zoek']",
+                    "input[placeholder*='Zoek']",
+                    "input[class*='search']",
+                    "#search",
+                    "[data-test='search-input']",
+                ]
+                typed = False
+                for sel in search_input_selectors:
+                    try:
+                        inp = page.locator(sel).first
+                        if await inp.is_visible(timeout=2000):
+                            await inp.click()
+                            await inp.fill(query)
+                            await inp.press("Enter")
+                            typed = True
+                            logger.debug("Kruidvat: zoekopdracht '%s' ingevoerd via '%s'", query, sel)
+                            break
+                    except Exception:
+                        pass
 
-            if not search_url:
-                logger.error("Kruidvat: geen werkende zoek-URL gevonden voor '%s'", query)
-                await browser.close()
-                return
+                if not typed:
+                    # Directe URL als fallback
+                    logger.debug("Kruidvat: zoekbalk niet gevonden, probeer directe URL")
+                    for base_url, param in SEARCH_CANDIDATES:
+                        try:
+                            await page.goto(
+                                f"{base_url}?{param}={query}",
+                                wait_until="domcontentloaded",
+                                timeout=20000,
+                            )
+                            await page.wait_for_timeout(2000)
+                            html = await page.content()
+                            if "product" in html.lower():
+                                break
+                        except Exception:
+                            pass
 
-            # Wacht op producten en extraheer
-            try:
-                await page.wait_for_timeout(2000)
-                # Wacht op een productkaart als die zichtbaar wordt
+                # Stap 4: wacht op laadresultaten
+                await page.wait_for_timeout(3000)
                 for selector in [
                     "[class*='product-tile']",
                     "[class*='product-card']",
+                    "[class*='ProductTile']",
                     "article",
-                    "[data-test='product']",
+                    "[data-test*='product']",
                 ]:
                     try:
-                        await page.wait_for_selector(selector, timeout=5000)
+                        await page.wait_for_selector(selector, timeout=4000)
+                        logger.debug("Kruidvat: productkaarten gevonden via '%s'", selector)
                         break
                     except Exception:
                         pass
 
+                # Stap 5: extraheer producten
                 html = await page.content()
                 products = self._extract_from_html(html, category_slug)
-                logger.info("Kruidvat: %d producten gevonden voor '%s'", len(products), query)
+
+                if products:
+                    logger.info("Kruidvat: %d producten gevonden voor '%s'", len(products), query)
+                else:
+                    logger.warning(
+                        "Kruidvat: 0 producten voor '%s' — huidige URL: %s",
+                        query, page.url,
+                    )
+
                 for p in products:
                     yield p
 
             except Exception as e:
-                logger.error("Kruidvat Playwright extractie fout voor '%s': %s", query, e)
+                logger.error("Kruidvat Playwright fout voor '%s': %s: %s", query, type(e).__name__, e)
             finally:
                 await browser.close()
 
