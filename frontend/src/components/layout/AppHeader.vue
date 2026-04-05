@@ -8,29 +8,15 @@
           <span class="font-bold text-primary-700 text-lg hidden sm:block">PrijsScanner</span>
         </RouterLink>
 
-        <!-- Zoekbalk -->
-        <form @submit.prevent="onSearch" class="flex-1">
-          <div class="relative">
-            <input
-              v-model="searchQuery"
-              type="search"
-              placeholder="Zoek bijv. yoghurt, Douwe Egberts..."
-              class="w-full pl-4 pr-10 py-2 rounded-full border border-gray-200 focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500 bg-gray-50 text-sm"
-              @keyup.enter="onSearch"
-            />
-            <button
-              type="submit"
-              class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-primary-600"
-            >
-              🔍
-            </button>
-          </div>
-        </form>
+        <!-- Titel (testmodus) -->
+        <div class="flex-1 text-center">
+          <span class="text-sm font-medium text-gray-500">🧪 Testmodus — Dove deodorant</span>
+        </div>
 
         <!-- Desktop nav -->
         <nav class="hidden md:flex items-center gap-4 shrink-0">
           <RouterLink to="/" class="text-sm text-gray-600 hover:text-primary-600 transition-colors" active-class="text-primary-600 font-medium">
-            Home
+            Vergelijking
           </RouterLink>
           <RouterLink to="/winkels" class="text-sm text-gray-600 hover:text-primary-600 transition-colors" active-class="text-primary-600 font-medium">
             Winkels

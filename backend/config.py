@@ -45,115 +45,27 @@ CATEGORY_UNIT_MAP: Dict[str, str] = {
     "vaatwastabletten": "stuk",
 }
 
-# Categorieën per winkeltype
+# Testmodus: één product voor alle winkels
+# Dove deodorant wordt verkocht bij zowel supermarkten als drogisten
+TEST_PRODUCT = {
+    "query": "Dove deodorant",
+    "category_slug": "deodorant",
+}
+
+# Categorieën per winkeltype (testmodus: alleen deodorant)
 SUPERMARKET_CATEGORIES = {
-    "vlees_vleeswaren": {
-        "label": "Vlees & vleeswaren",
-        "queries": ["kipfilet", "gehakt", "gekookte worst", "kipfilet vleeswaren"],
-        "icon": "🥩",
-    },
-    "kaas": {
-        "label": "Kaas",
-        "queries": ["kaas blok", "geraspte kaas", "kaas 48+"],
-        "icon": "🧀",
-    },
-    "koffie_thee": {
-        "label": "Koffie & thee",
-        "queries": ["Douwe Egberts koffie", "thee", "koffie"],
-        "icon": "☕",
-    },
-    "wasmiddel": {
-        "label": "Wasmiddel & afwasmiddel",
-        "queries": ["wasmiddel", "afwasmiddel", "vaatwastabletten"],
-        "icon": "🫧",
-    },
-    "pasta_rijst_sauzen": {
-        "label": "Pasta, rijst & sauzen",
-        "queries": ["pasta", "rijst", "pastasaus", "tomatensaus"],
-        "icon": "🍝",
-    },
-    "ontbijtgranen_muesli": {
-        "label": "Ontbijtgranen & muesli",
-        "queries": ["muesli", "cornflakes", "havermout", "ontbijtgranen"],
-        "icon": "🥣",
-    },
-    "boter": {
-        "label": "Boter",
-        "queries": ["Flower Farm boter", "roomboter", "boter"],
-        "icon": "🧈",
-    },
-    "yoghurt_kwark": {
-        "label": "Yoghurt & kwark",
-        "queries": ["yoghurt", "kwark", "magere kwark"],
-        "icon": "🥛",
-    },
-    "toiletpapier": {
-        "label": "Toiletpapier & keukenpapier",
-        "queries": ["toiletpapier", "keukenpapier", "wc papier"],
-        "icon": "🧻",
+    "deodorant": {
+        "label": "Deodorant",
+        "queries": ["Dove deodorant"],
+        "icon": "💨",
     },
 }
 
 DRUGSTORE_CATEGORIES = {
-    "shampoo_conditioner": {
-        "label": "Shampoo & conditioner",
-        "queries": ["shampoo", "conditioner"],
-        "icon": "🧴",
-    },
-    "douchegel_zeep": {
-        "label": "Douchegel & zeep",
-        "queries": ["douchegel", "zeep", "handzeep"],
-        "icon": "🚿",
-    },
     "deodorant": {
         "label": "Deodorant",
-        "queries": ["deodorant", "deo"],
+        "queries": ["Dove deodorant"],
         "icon": "💨",
-    },
-    "tandpasta_tandenborstels": {
-        "label": "Tandpasta & tandenborstels",
-        "queries": ["tandpasta", "tandenborstel", "elektrische tandenborstel"],
-        "icon": "🦷",
-    },
-    "wasmiddel_wasverzachter": {
-        "label": "Wasmiddel & wasverzachter",
-        "queries": ["wasmiddel", "wasverzachter", "waspoeder"],
-        "icon": "🧺",
-    },
-    "afwasmiddel_schoonmaakmiddelen": {
-        "label": "Afwasmiddel & schoonmaakmiddelen",
-        "queries": ["afwasmiddel", "schoonmaakmiddel", "allesreiniger"],
-        "icon": "🧹",
-    },
-    "billendoekjes": {
-        "label": "Billendoekjes",
-        "queries": ["billendoekjes", "babydoekjes"],
-        "icon": "🍼",
-    },
-    "baby_olie": {
-        "label": "Baby-olie",
-        "queries": ["baby olie", "babyolie"],
-        "icon": "🫙",
-    },
-    "luiers": {
-        "label": "Luiers",
-        "queries": ["luiers", "pampers", "luier"],
-        "icon": "👶",
-    },
-    "baby_shampoo": {
-        "label": "Baby-shampoo",
-        "queries": ["baby shampoo", "babyshampoo"],
-        "icon": "🍶",
-    },
-    "baby_douchezeep": {
-        "label": "Baby-douchezeep",
-        "queries": ["baby douchezeep", "baby douchegel"],
-        "icon": "🛁",
-    },
-    "vaatwastabletten": {
-        "label": "Vaatwastabletten",
-        "queries": ["vaatwastabletten", "vaatwas", "finish tabletten"],
-        "icon": "🍽️",
     },
 }
 

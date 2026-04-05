@@ -1,126 +1,136 @@
 <template>
-  <div class="py-4 space-y-6">
-    <!-- Welkom header -->
-    <div class="text-center py-6">
-      <div class="text-5xl mb-3">🛒</div>
-      <h1 class="text-2xl font-bold text-gray-900">PrijsScanner</h1>
-      <p class="text-gray-500 mt-1 text-sm">Vergelijk prijzen bij supermarkten en drogisten</p>
+  <div class="py-4 space-y-4">
+    <StoreFilterBar />
+
+    <!-- Header -->
+    <div class="text-center py-4">
+      <div class="text-5xl mb-2">💨</div>
+      <h1 class="text-2xl font-bold text-gray-900">Dove Deodorant</h1>
+      <p class="text-gray-500 text-sm mt-1">Prijsvergelijking bij alle supermarkten en drogisten</p>
     </div>
 
-    <!-- Snelzoek voorbeelden -->
-    <div>
-      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 px-1">
-        Snel zoeken
-      </h2>
-      <div class="flex flex-wrap gap-2">
-        <button
-          v-for="suggestion in suggestions"
-          :key="suggestion"
-          @click="quickSearch(suggestion)"
-          class="px-3 py-1.5 bg-white border border-gray-200 rounded-full text-sm text-gray-700 hover:border-primary-400 hover:text-primary-600 transition-colors"
-        >
-          {{ suggestion }}
-        </button>
+    <!-- Laden -->
+    <LoadingSpinner v-if="isLoading" message="Prijzen ophalen bij alle winkels..." />
+
+    <!-- Fout -->
+    <ErrorBanner
+      v-else-if="isError"
+      title="Prijzen niet beschikbaar"
+      message="Zorg dat de backend actief is en dat de scraper al gedraaid heeft."
+    />
+
+    <!-- Geen data -->
+    <div v-else-if="data && data.data.length === 0" class="text-center py-12 text-gray-400">
+      <div class="text-4xl mb-3">🔄</div>
+      <p class="font-medium text-gray-700">Nog geen prijsdata beschikbaar</p>
+      <p class="text-sm mt-2 text-gray-500">
+        Draai eerst de scraper om prijzen op te halen:
+      </p>
+      <code class="block mt-2 text-xs bg-gray-100 rounded-lg px-4 py-2 text-left max-w-sm mx-auto">
+        python scripts/run_scrapers.py
+      </code>
+      <button
+        @click="triggerScrape"
+        :disabled="scraping"
+        class="mt-4 btn-primary"
+      >
+        {{ scraping ? '⏳ Bezig...' : '▶ Scan starten' }}
+      </button>
+    </div>
+
+    <!-- Resultaten -->
+    <template v-else-if="data">
+      <!-- Verouderd data melding -->
+      <div
+        v-if="hasStaleData"
+        class="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 flex items-center gap-2 text-sm text-amber-700"
+      >
+        <span>⏳</span>
+        <span>Sommige prijzen worden op de achtergrond bijgewerkt...</span>
       </div>
-    </div>
 
-    <!-- Supermarkt categorieën -->
-    <div>
-      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 px-1">
-        🛒 Supermarkt categorieën
-      </h2>
-      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        <RouterLink
-          v-for="cat in supermarktCategories"
-          :key="cat.slug"
-          :to="`/categorie/${cat.slug}`"
-          class="card p-3 flex items-center gap-2 hover:border-primary-200 hover:shadow transition-all border border-transparent"
-        >
-          <span class="text-2xl">{{ cat.icon }}</span>
-          <div class="min-w-0">
-            <p class="text-sm font-medium text-gray-800 leading-tight">{{ cat.label }}</p>
-            <p v-if="cat.product_count > 0" class="text-xs text-gray-400">{{ cat.product_count }} producten</p>
+      <!-- Samenvatting -->
+      <div class="card p-4 bg-primary-50 border-primary-100">
+        <div class="flex items-center justify-between flex-wrap gap-2">
+          <div>
+            <p class="text-sm text-primary-700 font-medium">
+              {{ data.meta.total }} producten gevonden bij {{ data.data[0]?.prices.length ?? 0 }} winkels
+            </p>
+            <p v-if="cheapest" class="text-xs text-gray-500 mt-0.5">
+              Goedkoopste: <strong>{{ cheapest.store_name }}</strong>
+              {{ cheapest.unit_price_formatted ?? cheapest.price_formatted }}
+            </p>
           </div>
-        </RouterLink>
+          <button
+            @click="refetch()"
+            class="text-sm text-primary-600 font-medium"
+            :class="{ 'animate-pulse': isFetching }"
+          >
+            ↻ Vernieuwen
+          </button>
+        </div>
       </div>
-    </div>
 
-    <!-- Drogist categorieën -->
-    <div>
-      <h2 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3 px-1">
-        💊 Drogist categorieën
-      </h2>
-      <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-        <RouterLink
-          v-for="cat in drogistCategories"
-          :key="cat.slug"
-          :to="`/categorie/${cat.slug}`"
-          class="card p-3 flex items-center gap-2 hover:border-primary-200 hover:shadow transition-all border border-transparent"
-        >
-          <span class="text-2xl">{{ cat.icon }}</span>
-          <div class="min-w-0">
-            <p class="text-sm font-medium text-gray-800 leading-tight">{{ cat.label }}</p>
-            <p v-if="cat.product_count > 0" class="text-xs text-gray-400">{{ cat.product_count }} producten</p>
-          </div>
-        </RouterLink>
-      </div>
-    </div>
+      <CompareTable :results="data.data" :show-images="true" />
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useRouter, RouterLink } from 'vue-router'
+import { computed, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import axios from 'axios'
-import type { Category } from '@/types'
+import type { CompareResponse, StorePrice } from '@/types'
+import { useFiltersStore } from '@/stores/filtersStore'
+import StoreFilterBar from '@/components/layout/StoreFilterBar.vue'
+import CompareTable from '@/components/compare/CompareTable.vue'
+import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
+import ErrorBanner from '@/components/common/ErrorBanner.vue'
 
-const router = useRouter()
+const filtersStore = useFiltersStore()
+const scraping = ref(false)
+const storeParam = computed(() => filtersStore.activeStoreList.join(','))
 
-const { data: categories } = useQuery({
-  queryKey: ['categories'],
+const { data, isLoading, isError, isFetching, refetch } = useQuery({
+  queryKey: computed(() => ['dove-deodorant', storeParam.value]),
   queryFn: async () => {
-    const { data } = await axios.get<Category[]>('/api/v1/categories')
+    const { data } = await axios.get<CompareResponse>('/api/v1/compare', {
+      params: {
+        q: 'Dove deodorant',
+        category: 'deodorant',
+        stores: storeParam.value,
+        limit: 50,
+      },
+    })
     return data
   },
-  staleTime: 1000 * 60 * 10,
+  refetchInterval: 1000 * 60 * 5, // automatisch herladen elke 5 minuten
 })
 
-const supermarktCategories = computed(() =>
-  (categories.value || defaultCategories).filter((c) => c.store_type === 'supermarket')
-)
-const drogistCategories = computed(() =>
-  (categories.value || defaultCategories).filter((c) => c.store_type === 'drugstore')
+const hasStaleData = computed(() =>
+  data.value?.data.some((r) => r.prices.some((p) => p.freshness === 'stale')) ?? false
 )
 
-const suggestions = [
-  'Douwe Egberts', 'yoghurt', 'kipfilet', 'kaas', 'shampoo',
-  'luiers', 'wasmiddel', 'pasta', 'boter', 'tandpasta',
-]
+// Goedkoopste optie over alle resultaten
+const cheapest = computed<StorePrice | null>(() => {
+  if (!data.value?.data.length) return null
+  const allPrices = data.value.data.flatMap((r) => r.prices)
+  if (!allPrices.length) return null
+  return allPrices.reduce((best, p) => {
+    const bKey = best.unit_price_cents ?? best.price_cents
+    const pKey = p.unit_price_cents ?? p.price_cents
+    return pKey < bKey ? p : best
+  })
+})
 
-function quickSearch(query: string) {
-  router.push({ name: 'search', query: { q: query } })
+async function triggerScrape() {
+  scraping.value = true
+  await Promise.allSettled(
+    filtersStore.activeStoreList.map((s) => axios.post(`/api/v1/stores/${s}/refresh`))
+  )
+  setTimeout(() => {
+    refetch()
+    scraping.value = false
+  }, 3000)
 }
-
-// Standaard categorieën als de API nog niet beschikbaar is
-const defaultCategories: Category[] = [
-  { slug: 'vlees_vleeswaren', label: 'Vlees & vleeswaren', icon: '🥩', store_type: 'supermarket', product_count: 0 },
-  { slug: 'kaas', label: 'Kaas', icon: '🧀', store_type: 'supermarket', product_count: 0 },
-  { slug: 'koffie_thee', label: 'Koffie & thee', icon: '☕', store_type: 'supermarket', product_count: 0 },
-  { slug: 'wasmiddel', label: 'Wasmiddel', icon: '🫧', store_type: 'supermarket', product_count: 0 },
-  { slug: 'pasta_rijst_sauzen', label: 'Pasta, rijst & sauzen', icon: '🍝', store_type: 'supermarket', product_count: 0 },
-  { slug: 'ontbijtgranen_muesli', label: 'Ontbijtgranen', icon: '🥣', store_type: 'supermarket', product_count: 0 },
-  { slug: 'boter', label: 'Boter', icon: '🧈', store_type: 'supermarket', product_count: 0 },
-  { slug: 'yoghurt_kwark', label: 'Yoghurt & kwark', icon: '🥛', store_type: 'supermarket', product_count: 0 },
-  { slug: 'toiletpapier', label: 'Toiletpapier', icon: '🧻', store_type: 'supermarket', product_count: 0 },
-  { slug: 'shampoo_conditioner', label: 'Shampoo', icon: '🧴', store_type: 'drugstore', product_count: 0 },
-  { slug: 'douchegel_zeep', label: 'Douchegel & zeep', icon: '🚿', store_type: 'drugstore', product_count: 0 },
-  { slug: 'deodorant', label: 'Deodorant', icon: '💨', store_type: 'drugstore', product_count: 0 },
-  { slug: 'tandpasta_tandenborstels', label: 'Tandpasta', icon: '🦷', store_type: 'drugstore', product_count: 0 },
-  { slug: 'wasmiddel_wasverzachter', label: 'Wasmiddel', icon: '🧺', store_type: 'drugstore', product_count: 0 },
-  { slug: 'billendoekjes', label: 'Billendoekjes', icon: '🍼', store_type: 'drugstore', product_count: 0 },
-  { slug: 'luiers', label: 'Luiers', icon: '👶', store_type: 'drugstore', product_count: 0 },
-  { slug: 'baby_shampoo', label: 'Baby-shampoo', icon: '🍶', store_type: 'drugstore', product_count: 0 },
-  { slug: 'vaatwastabletten', label: 'Vaatwastabletten', icon: '🍽️', store_type: 'drugstore', product_count: 0 },
-]
 </script>
