@@ -45,18 +45,46 @@ class KruidvatScraper(BaseScraper):
             logger.error("Playwright niet beschikbaar voor Kruidvat scraper")
             return
 
+        # Importeer stealth-plugin (verbergt Playwright-vingerafdruk voor Akamai)
+        try:
+            from playwright_stealth import stealth_async
+        except ImportError:
+            stealth_async = None
+            logger.warning("playwright-stealth niet geïnstalleerd — voer uit: pip install playwright-stealth")
+
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=settings.playwright_headless)
+            browser = await pw.chromium.launch(
+                headless=settings.playwright_headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-infobars",
+                    "--window-size=1280,800",
+                ],
+            )
             context = await browser.new_context(
                 user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
                 locale="nl-NL",
                 viewport={"width": 1280, "height": 800},
+                extra_http_headers={
+                    "Accept-Language": "nl-NL,nl;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                },
+            )
+            # Verberg navigator.webdriver vlag
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
             )
             page = await context.new_page()
+            # Pas stealth toe als de package beschikbaar is
+            if stealth_async:
+                await stealth_async(page)
 
             try:
                 # Stap 1: open homepage
