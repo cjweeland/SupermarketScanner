@@ -3,12 +3,23 @@ Abstract base class voor alle winkelscrapers.
 """
 import asyncio
 import logging
+import traceback
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
 
 from models.schemas import ProductScraped
 
 logger = logging.getLogger(__name__)
+
+
+def log_scrape_error(store: str, query: str, exc: Exception) -> None:
+    """Log een scrape-fout met volledig type en bericht."""
+    msg = str(exc) or "(geen foutbericht)"
+    logger.error(
+        "%s search fout voor '%s': %s: %s",
+        store, query, type(exc).__name__, msg,
+    )
+    logger.debug("Volledige stacktrace:\n%s", traceback.format_exc())
 
 
 class BaseScraper(ABC):
