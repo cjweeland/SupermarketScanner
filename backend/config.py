@@ -6,7 +6,6 @@ class Settings(BaseSettings):
     backend_port: int = 8000
     database_url: str = "sqlite+aiosqlite:///./prices.db"
     cache_ttl_supermarket_hours: int = 4
-    cache_ttl_drugstore_hours: int = 6
     scraper_request_delay_ms: int = 300
     log_level: str = "INFO"
     playwright_headless: bool = True
@@ -18,9 +17,8 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-# Welke eenheid hoort bij welke categorie voor eenheidsprijs-weergave
+# Eenheid per categorie voor eenheidsprijs-weergave
 CATEGORY_UNIT_MAP: Dict[str, str] = {
-    # Supermarkt
     "vlees_vleeswaren": "100g",
     "kaas": "100g",
     "koffie_thee": "100g",
@@ -30,30 +28,56 @@ CATEGORY_UNIT_MAP: Dict[str, str] = {
     "boter": "100g",
     "yoghurt_kwark": "100g",
     "toiletpapier": "rol",
-    # Drogist
-    "shampoo_conditioner": "100ml",
-    "douchegel_zeep": "100ml",
     "deodorant": "100ml",
-    "tandpasta_tandenborstels": "100g",
-    "wasmiddel_wasverzachter": "100ml",
-    "afwasmiddel_schoonmaakmiddelen": "100ml",
-    "billendoekjes": "stuk",
-    "baby_olie": "100ml",
-    "luiers": "stuk",
-    "baby_shampoo": "100ml",
-    "baby_douchezeep": "100ml",
-    "vaatwastabletten": "stuk",
 }
 
-# Testmodus: één product voor alle winkels
-# Dove deodorant wordt verkocht bij zowel supermarkten als drogisten
-TEST_PRODUCT = {
-    "query": "Dove deodorant",
-    "category_slug": "deodorant",
-}
-
-# Categorieën per winkeltype (testmodus: alleen deodorant)
-SUPERMARKET_CATEGORIES = {
+# Alle productcategorieën met zoektermen voor supermarktscanner.nl
+CATEGORIES = {
+    "vlees_vleeswaren": {
+        "label": "Vlees & vleeswaren",
+        "queries": ["kipfilet", "gehakt", "gekookte worst"],
+        "icon": "🥩",
+    },
+    "kaas": {
+        "label": "Kaas",
+        "queries": ["kaas blok", "geraspte kaas"],
+        "icon": "🧀",
+    },
+    "koffie_thee": {
+        "label": "Koffie & thee",
+        "queries": ["Douwe Egberts koffie", "thee"],
+        "icon": "☕",
+    },
+    "wasmiddel": {
+        "label": "Wasmiddel & afwasmiddel",
+        "queries": ["wasmiddel", "vaatwastabletten"],
+        "icon": "🫧",
+    },
+    "pasta_rijst_sauzen": {
+        "label": "Pasta, rijst & sauzen",
+        "queries": ["pasta", "rijst", "pastasaus"],
+        "icon": "🍝",
+    },
+    "ontbijtgranen_muesli": {
+        "label": "Ontbijtgranen & muesli",
+        "queries": ["muesli", "havermout"],
+        "icon": "🥣",
+    },
+    "boter": {
+        "label": "Boter",
+        "queries": ["Flower Farm boter", "roomboter"],
+        "icon": "🧈",
+    },
+    "yoghurt_kwark": {
+        "label": "Yoghurt & kwark",
+        "queries": ["yoghurt", "kwark"],
+        "icon": "🥛",
+    },
+    "toiletpapier": {
+        "label": "Toiletpapier & keukenpapier",
+        "queries": ["toiletpapier", "keukenpapier"],
+        "icon": "🧻",
+    },
     "deodorant": {
         "label": "Deodorant",
         "queries": ["Dove deodorant"],
@@ -61,26 +85,27 @@ SUPERMARKET_CATEGORIES = {
     },
 }
 
-DRUGSTORE_CATEGORIES = {
-    "deodorant": {
-        "label": "Deodorant",
-        "queries": ["Dove deodorant"],
-        "icon": "💨",
-    },
-}
+# Voor backwards-compatibiliteit met bestaande code
+SUPERMARKET_CATEGORIES = CATEGORIES
+DRUGSTORE_CATEGORIES = {}
+ALL_CATEGORIES = CATEGORIES
 
-ALL_CATEGORIES = {**SUPERMARKET_CATEGORIES, **DRUGSTORE_CATEGORIES}
-
-SUPERMARKET_STORE_SLUGS = ["albert_heijn", "jumbo", "lidl", "dirk", "plus"]
-DRUGSTORE_STORE_SLUGS = ["kruidvat", "trekpleister", "etos"]
-
+# Winkels die op supermarktscanner.nl staan
+# Slugs worden dynamisch ontdekt via de scraper — dit zijn bekende winkels
 STORES = {
     "albert_heijn": {"display_name": "Albert Heijn", "type": "supermarket", "color": "#00ADE6"},
-    "jumbo": {"display_name": "Jumbo", "type": "supermarket", "color": "#FFC800"},
-    "lidl": {"display_name": "Lidl", "type": "supermarket", "color": "#0050AA"},
-    "dirk": {"display_name": "Dirk", "type": "supermarket", "color": "#E30613"},
-    "plus": {"display_name": "Plus", "type": "supermarket", "color": "#E4002B"},
-    "kruidvat": {"display_name": "Kruidvat", "type": "drugstore", "color": "#DA291C"},
-    "trekpleister": {"display_name": "Trekpleister", "type": "drugstore", "color": "#E4002B"},
-    "etos": {"display_name": "Etos", "type": "drugstore", "color": "#00517F"},
+    "jumbo":         {"display_name": "Jumbo",        "type": "supermarket", "color": "#FFC800"},
+    "plus":          {"display_name": "Plus",         "type": "supermarket", "color": "#E4002B"},
+    "lidl":          {"display_name": "Lidl",         "type": "supermarket", "color": "#0050AA"},
+    "dirk":          {"display_name": "Dirk",         "type": "supermarket", "color": "#E30613"},
+    "aldi":          {"display_name": "Aldi",         "type": "supermarket", "color": "#1A4F9F"},
+    "coop":          {"display_name": "Coop",         "type": "supermarket", "color": "#E2001A"},
+    "hoogvliet":     {"display_name": "Hoogvliet",    "type": "supermarket", "color": "#E4002B"},
+    "jan_linders":   {"display_name": "Jan Linders",  "type": "supermarket", "color": "#00853E"},
+    "poiesz":        {"display_name": "Poiesz",       "type": "supermarket", "color": "#E4002B"},
+    "dekamarkt":     {"display_name": "DekaMarkt",    "type": "supermarket", "color": "#004B98"},
+    "spar":          {"display_name": "Spar",         "type": "supermarket", "color": "#007A33"},
 }
+
+SUPERMARKET_STORE_SLUGS = list(STORES.keys())
+DRUGSTORE_STORE_SLUGS = []
