@@ -145,89 +145,46 @@ class SupermarktScannerScraper(BaseScraper):
     def _extract_from_html(self, soup, query: str, category_slug: str) -> list[ProductScraped]:
         """
         Verwerk de HTML van supermarktscanner.nl/product.php.
-        We zoeken rijen/blokken met productnaam + prijzen per winkel.
+        Structuur:
+          div.product-entry[data-name="..."]
+            div.cbp-pgitem  (één per winkel)
+              span.shoplogo > img[src="/img/shops_logo/{winkel}_tag.png"]
+              h3.pgprice     → "3.99"
         """
         results = []
 
-        # Probeer tabel-rijen: <tr> met meerdere <td> waaronder winkelnamen/prijzen
-        tables = soup.find_all("table")
-        for table in tables:
-            header_cells = table.find("tr")
-            if not header_cells:
-                continue
-            headers = [th.get_text(strip=True).lower() for th in header_cells.find_all(["th", "td"])]
-
-            for row in table.find_all("tr")[1:]:
-                cells = row.find_all(["td", "th"])
-                if len(cells) < 2:
-                    continue
-                name = cells[0].get_text(strip=True)
-                if not name or len(name) < 3:
-                    continue
-
-                # Kolom-headers bevatten winkelnamen
-                for idx, header in enumerate(headers[1:], start=1):
-                    store_slug = self._map_store_name(header)
-                    if not store_slug or idx >= len(cells):
-                        continue
-                    price_cents = self._price_str_to_cents(cells[idx].get_text(strip=True))
-                    if price_cents > 0:
-                        results.append(ProductScraped(
-                            store_slug=store_slug,
-                            store_product_id=f"{name[:30]}_{store_slug}",
-                            name=name,
-                            category_slug=category_slug,
-                            price_cents=price_cents,
-                        ))
-
-        if results:
-            return results
-
-        # Probeer kaart-/blok-structuur: elk product als artikel/div
-        product_blocks = (
-            soup.find_all(class_=re.compile(r"product[-_]?(row|item|card|result)", re.I)) or
-            soup.find_all("article") or
-            soup.find_all(class_=re.compile(r"row|item|card", re.I))
-        )
-
-        for block in product_blocks:
-            name_el = (
-                block.find(class_=re.compile(r"name|title|product[-_]?name", re.I)) or
-                block.find("h2") or block.find("h3") or block.find("h4")
-            )
-            name = name_el.get_text(strip=True) if name_el else ""
+        for entry in soup.find_all(class_="product-entry"):
+            name = entry.get("data-name", "").strip()
             if not name:
                 continue
 
-            # Prijzen per winkel binnen het blok
-            price_els = block.find_all(class_=re.compile(r"price|prijs", re.I))
-            for el in price_els:
-                store_name = (
-                    el.get("data-store") or el.get("data-supermarket") or
-                    el.get("title") or ""
-                )
-                if not store_name:
-                    parent = el.parent
-                    if parent:
-                        store_name = (
-                            parent.get("data-store", "") or
-                            parent.get("title", "") or
-                            parent.get_text(strip=True)[:30]
-                        )
-
-                store_slug = self._map_store_name(store_name.lower())
+            for item in entry.find_all(class_="cbp-pgitem"):
+                # Winkelnaam uit logo-afbeelding: /img/shops_logo/hoogvliet_tag.png
+                logo_img = item.find("img", src=re.compile(r"/img/shops_logo/"))
+                if not logo_img:
+                    continue
+                src = logo_img.get("src", "")
+                # Haal winkelnaam uit bestandsnaam: "hoogvliet_tag.png" → "hoogvliet"
+                shop_raw = re.sub(r"_tag\.png.*", "", src.split("/")[-1])
+                store_slug = self._map_store_name(shop_raw)
                 if not store_slug:
                     continue
 
-                price_cents = self._price_str_to_cents(el.get_text(strip=True))
-                if price_cents > 0:
-                    results.append(ProductScraped(
-                        store_slug=store_slug,
-                        store_product_id=f"{name[:30]}_{store_slug}",
-                        name=name,
-                        category_slug=category_slug,
-                        price_cents=price_cents,
-                    ))
+                price_el = item.find(class_="pgprice")
+                if not price_el:
+                    continue
+                price_cents = self._price_str_to_cents(price_el.get_text(strip=True))
+                if price_cents <= 0:
+                    continue
+
+                results.append(ProductScraped(
+                    store_slug=store_slug,
+                    store_product_id=f"{name[:40]}_{store_slug}",
+                    name=name.title(),
+                    category_slug=category_slug,
+                    price_cents=price_cents,
+                    url=f"{BASE_URL}/product.php?keyword={quote_plus(query)}",
+                ))
 
         return results
 
