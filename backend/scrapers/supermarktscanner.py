@@ -6,8 +6,12 @@ De website vergelijkt al — wij extraheren die vergelijking.
 import json
 import logging
 import re
+import tempfile
+import os
 from typing import AsyncIterator, Optional
+from urllib.parse import quote_plus
 
+import httpx
 from bs4 import BeautifulSoup
 
 from models.schemas import ProductScraped, PromoScraped
@@ -16,6 +20,7 @@ from scrapers.base import BaseScraper
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://www.supermarktscanner.nl"
+SEARCH_URL = f"{BASE_URL}/product.php?keyword={{keyword}}"
 
 # Mapping van supermarktscanner-winkelnamen naar onze slugs
 STORE_NAME_MAP = {
@@ -34,6 +39,16 @@ STORE_NAME_MAP = {
     "spar": "spar",
 }
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "nl-NL,nl;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
 
 class SupermarktScannerScraper(BaseScraper):
     """
@@ -48,139 +63,40 @@ class SupermarktScannerScraper(BaseScraper):
         super().__init__(request_delay_ms)
 
     async def search(self, query: str, category_slug: str) -> AsyncIterator[ProductScraped]:
-        """Zoek via Playwright en extraheer prijzen per winkel."""
+        url = SEARCH_URL.format(keyword=quote_plus(query))
         try:
-            from playwright.async_api import async_playwright
-            from config import settings
-        except ImportError:
-            logger.error("Playwright niet beschikbaar")
+            async with httpx.AsyncClient(
+                headers=HEADERS,
+                follow_redirects=True,
+                timeout=20.0,
+            ) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                html = resp.text
+        except Exception as e:
+            logger.error("SupermarktScanner HTTP fout voor '%s': %s: %s", query, type(e).__name__, e)
             return
 
-        stealth_async = None
-        try:
-            from playwright_stealth import stealth_async
-        except ImportError:
-            try:
-                from playwright_stealth import Stealth
-                async def stealth_async(p):
-                    await Stealth().apply_stealth_async(p)
-            except ImportError:
-                pass
+        products = self._extract_products(html, query, category_slug)
+        logger.info(
+            "SupermarktScanner: %d resultaten voor '%s'",
+            len(products), query,
+        )
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=settings.playwright_headless,
-                args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        if not products:
+            debug_path = os.path.join(
+                tempfile.gettempdir(),
+                f"sms_debug_{query[:20].replace(' ', '_')}.html",
             )
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                locale="nl-NL",
-                viewport={"width": 1280, "height": 800},
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.warning(
+                "SupermarktScanner: 0 resultaten voor '%s' — URL: %s — debug: %s",
+                query, url, debug_path,
             )
-            await context.add_init_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-            page = await context.new_page()
-            if stealth_async:
-                await stealth_async(page)
 
-            try:
-                # Probeer directe zoek-URL's
-                search_urls = [
-                    f"{BASE_URL}/zoeken?q={query}",
-                    f"{BASE_URL}/search?q={query}",
-                    f"{BASE_URL}/zoeken?query={query}",
-                    f"{BASE_URL}/?s={query}",
-                ]
-
-                html = None
-                for url in search_urls:
-                    try:
-                        resp = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                        if resp and resp.status == 200:
-                            await page.wait_for_timeout(2000)
-                            html = await page.content()
-                            if "product" in html.lower() or "prijs" in html.lower():
-                                logger.info("SupermarktScanner: werkende URL: %s", url)
-                                break
-                    except Exception as e:
-                        logger.debug("SupermarktScanner URL %s mislukt: %s", url, e)
-
-                # Als directe URL's niet werken: gebruik zoekbalk op homepage
-                if not html or ("product" not in html.lower() and "prijs" not in html.lower()):
-                    logger.info("SupermarktScanner: directe URL's mislukten, gebruik zoekbalk")
-                    try:
-                        await page.goto(BASE_URL, wait_until="domcontentloaded", timeout=20000)
-                        await page.wait_for_timeout(1500)
-
-                        # Accepteer cookies
-                        for sel in ["#onetrust-accept-btn-handler",
-                                    "button:has-text('Accepteer')",
-                                    "button:has-text('Akkoord')"]:
-                            try:
-                                btn = page.locator(sel).first
-                                if await btn.is_visible(timeout=1500):
-                                    await btn.click()
-                                    await page.wait_for_timeout(500)
-                                    break
-                            except Exception:
-                                pass
-
-                        # Zoekbalk invullen
-                        for sel in ["input[type='search']", "input[name='q']",
-                                    "input[placeholder*='zoek']", "input[placeholder*='Zoek']",
-                                    "#search", ".search-input"]:
-                            try:
-                                inp = page.locator(sel).first
-                                if await inp.is_visible(timeout=2000):
-                                    await inp.fill(query)
-                                    await inp.press("Enter")
-                                    await page.wait_for_timeout(3000)
-                                    html = await page.content()
-                                    logger.info("SupermarktScanner: gezocht via zoekbalk")
-                                    break
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        logger.error("SupermarktScanner homepage mislukt: %s", e)
-
-                if not html:
-                    logger.error("SupermarktScanner: geen pagina geladen voor '%s'", query)
-                    await browser.close()
-                    return
-
-                # Extraheer prijzen per winkel
-                products = self._extract_products(html, query, category_slug)
-                logger.info(
-                    "SupermarktScanner: %d prijs-vermeldingen gevonden voor '%s'",
-                    len(products), query,
-                )
-
-                # Debug dump als er niets gevonden is
-                if not products:
-                    import tempfile, os
-                    debug_path = os.path.join(
-                        tempfile.gettempdir(),
-                        f"sms_debug_{query[:20].replace(' ', '_')}.html"
-                    )
-                    with open(debug_path, "w", encoding="utf-8") as f:
-                        f.write(html)
-                    logger.warning(
-                        "SupermarktScanner: 0 resultaten voor '%s' — URL: %s — debug: %s",
-                        query, page.url, debug_path,
-                    )
-
-                for p in products:
-                    yield p
-
-            except Exception as e:
-                logger.error("SupermarktScanner fout voor '%s': %s: %s", query, type(e).__name__, e)
-            finally:
-                await browser.close()
+        for p in products:
+            yield p
 
     def _extract_products(self, html: str, query: str, category_slug: str) -> list[ProductScraped]:
         soup = BeautifulSoup(html, "lxml")
@@ -221,27 +137,103 @@ class SupermarktScannerScraper(BaseScraper):
         if results:
             return results
 
-        # 2. __NEXT_DATA__ of andere embedded JSON
-        next_script = soup.find("script", id="__NEXT_DATA__")
-        if next_script:
-            try:
-                data = json.loads(next_script.string or "")
-                results.extend(self._extract_from_next_data(data, query, category_slug))
-            except Exception:
-                pass
+        # 2. HTML prijstabellen / productrijen
+        results.extend(self._extract_from_html(soup, query, category_slug))
+
+        return results
+
+    def _extract_from_html(self, soup, query: str, category_slug: str) -> list[ProductScraped]:
+        """
+        Verwerk de HTML van supermarktscanner.nl/product.php.
+        We zoeken rijen/blokken met productnaam + prijzen per winkel.
+        """
+        results = []
+
+        # Probeer tabel-rijen: <tr> met meerdere <td> waaronder winkelnamen/prijzen
+        tables = soup.find_all("table")
+        for table in tables:
+            header_cells = table.find("tr")
+            if not header_cells:
+                continue
+            headers = [th.get_text(strip=True).lower() for th in header_cells.find_all(["th", "td"])]
+
+            for row in table.find_all("tr")[1:]:
+                cells = row.find_all(["td", "th"])
+                if len(cells) < 2:
+                    continue
+                name = cells[0].get_text(strip=True)
+                if not name or len(name) < 3:
+                    continue
+
+                # Kolom-headers bevatten winkelnamen
+                for idx, header in enumerate(headers[1:], start=1):
+                    store_slug = self._map_store_name(header)
+                    if not store_slug or idx >= len(cells):
+                        continue
+                    price_cents = self._price_str_to_cents(cells[idx].get_text(strip=True))
+                    if price_cents > 0:
+                        results.append(ProductScraped(
+                            store_slug=store_slug,
+                            store_product_id=f"{name[:30]}_{store_slug}",
+                            name=name,
+                            category_slug=category_slug,
+                            price_cents=price_cents,
+                        ))
 
         if results:
             return results
 
-        # 3. HTML prijstabellen — supermarktscanner toont prijzen in een tabel/raster
-        results.extend(self._extract_from_price_table(soup, query, category_slug))
+        # Probeer kaart-/blok-structuur: elk product als artikel/div
+        product_blocks = (
+            soup.find_all(class_=re.compile(r"product[-_]?(row|item|card|result)", re.I)) or
+            soup.find_all("article") or
+            soup.find_all(class_=re.compile(r"row|item|card", re.I))
+        )
+
+        for block in product_blocks:
+            name_el = (
+                block.find(class_=re.compile(r"name|title|product[-_]?name", re.I)) or
+                block.find("h2") or block.find("h3") or block.find("h4")
+            )
+            name = name_el.get_text(strip=True) if name_el else ""
+            if not name:
+                continue
+
+            # Prijzen per winkel binnen het blok
+            price_els = block.find_all(class_=re.compile(r"price|prijs", re.I))
+            for el in price_els:
+                store_name = (
+                    el.get("data-store") or el.get("data-supermarket") or
+                    el.get("title") or ""
+                )
+                if not store_name:
+                    parent = el.parent
+                    if parent:
+                        store_name = (
+                            parent.get("data-store", "") or
+                            parent.get("title", "") or
+                            parent.get_text(strip=True)[:30]
+                        )
+
+                store_slug = self._map_store_name(store_name.lower())
+                if not store_slug:
+                    continue
+
+                price_cents = self._price_str_to_cents(el.get_text(strip=True))
+                if price_cents > 0:
+                    results.append(ProductScraped(
+                        store_slug=store_slug,
+                        store_product_id=f"{name[:30]}_{store_slug}",
+                        name=name,
+                        category_slug=category_slug,
+                        price_cents=price_cents,
+                    ))
 
         return results
 
     def _extract_store_prices_from_jsonld(
         self, item: dict
     ) -> list[tuple[str, int, Optional[PromoScraped]]]:
-        """Extraheer (store_slug, price_cents, promo) uit JSON-LD offers."""
         results = []
         offers = item.get("offers", [])
         if isinstance(offers, dict):
@@ -282,124 +274,7 @@ class SupermarktScannerScraper(BaseScraper):
 
         return results
 
-    def _extract_from_next_data(self, data: dict, query: str, category_slug: str) -> list[ProductScraped]:
-        results = []
-        products_raw = self._find_in_obj(data, ["products", "items", "results", "hits"])
-        for p in (products_raw or []):
-            if not isinstance(p, dict):
-                continue
-            name = p.get("name") or p.get("title") or query
-            # Zoek naar prijzen per winkel
-            prices = p.get("prices") or p.get("storePrices") or p.get("offers") or []
-            if isinstance(prices, dict):
-                # Soms: {"albert_heijn": 1.99, "jumbo": 2.19}
-                for store_key, price_val in prices.items():
-                    store_slug = self._map_store_name(store_key)
-                    if not store_slug:
-                        continue
-                    try:
-                        price_cents = round(float(str(price_val).replace(",", ".")) * 100)
-                    except (ValueError, TypeError):
-                        continue
-                    results.append(ProductScraped(
-                        store_slug=store_slug,
-                        store_product_id=f"{p.get('id', name[:30])}_{store_slug}",
-                        name=str(name),
-                        category_slug=category_slug,
-                        price_cents=price_cents,
-                    ))
-            elif isinstance(prices, list):
-                for offer in prices:
-                    if not isinstance(offer, dict):
-                        continue
-                    store_name = (offer.get("store") or offer.get("supermarket") or
-                                  offer.get("retailer") or "").lower()
-                    store_slug = self._map_store_name(store_name)
-                    if not store_slug:
-                        continue
-                    price_val = offer.get("price") or offer.get("amount") or 0
-                    try:
-                        price_cents = round(float(str(price_val).replace(",", ".")) * 100)
-                    except (ValueError, TypeError):
-                        continue
-                    results.append(ProductScraped(
-                        store_slug=store_slug,
-                        store_product_id=f"{p.get('id', name[:30])}_{store_slug}",
-                        name=str(name),
-                        category_slug=category_slug,
-                        price_cents=price_cents,
-                    ))
-        return results
-
-    def _extract_from_price_table(self, soup, query: str, category_slug: str) -> list[ProductScraped]:
-        """Extraheer uit HTML-prijstabellen zoals supermarktscanner die toont."""
-        results = []
-
-        # Zoek productrijen — elke rij heeft productinfo + prijs per winkel
-        product_rows = (
-            soup.find_all(class_=re.compile(r"product", re.I)) or
-            soup.find_all("article") or
-            soup.find_all("tr")
-        )
-
-        for row in product_rows:
-            name_el = (row.find(class_=re.compile(r"name|title|product-name", re.I)) or
-                       row.find("h2") or row.find("h3"))
-            name = name_el.get_text(strip=True) if name_el else ""
-            if not name:
-                continue
-
-            # Zoek prijzen per winkel in de rij
-            price_cells = row.find_all(class_=re.compile(r"price|prijs", re.I))
-            for cell in price_cells:
-                # Winkel uit data-attribuut of omliggende element
-                store_name = (cell.get("data-store") or cell.get("data-supermarket") or
-                              cell.get("title") or "")
-                if not store_name:
-                    parent = cell.parent
-                    if parent:
-                        store_name = parent.get("data-store", "")
-
-                store_slug = self._map_store_name(store_name.lower())
-                if not store_slug:
-                    continue
-
-                price_str = cell.get_text(strip=True)
-                price_cents = self._price_str_to_cents(price_str)
-                if price_cents <= 0:
-                    continue
-
-                results.append(ProductScraped(
-                    store_slug=store_slug,
-                    store_product_id=f"{name[:30]}_{store_slug}",
-                    name=name,
-                    category_slug=category_slug,
-                    price_cents=price_cents,
-                ))
-
-        return results
-
-    def _find_in_obj(self, data, keys: list, depth: int = 0) -> Optional[list]:
-        if depth > 10:
-            return None
-        if isinstance(data, dict):
-            for key in keys:
-                val = data.get(key)
-                if isinstance(val, list) and val and isinstance(val[0], dict):
-                    return val
-            for v in data.values():
-                r = self._find_in_obj(v, keys, depth + 1)
-                if r:
-                    return r
-        elif isinstance(data, list):
-            for item in data:
-                r = self._find_in_obj(item, keys, depth + 1)
-                if r:
-                    return r
-        return None
-
     def _map_store_name(self, name: str) -> Optional[str]:
-        """Zet een winkelnaam om naar een slug."""
         name = name.lower().strip()
         for key, slug in STORE_NAME_MAP.items():
             if key in name or name in key:
@@ -420,14 +295,9 @@ class SupermarktScannerScraper(BaseScraper):
 
     async def health_check(self) -> bool:
         try:
-            from playwright.async_api import async_playwright
-            from config import settings
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(headless=settings.playwright_headless)
-                page = await browser.new_page()
-                resp = await page.goto(BASE_URL, timeout=15000)
-                await browser.close()
-                return resp is not None and resp.status == 200
+            async with httpx.AsyncClient(headers=HEADERS, timeout=10.0) as client:
+                resp = await client.get(BASE_URL)
+                return resp.status_code == 200
         except Exception as e:
             logger.warning("SupermarktScanner health check mislukt: %s", e)
             return False
