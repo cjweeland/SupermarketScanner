@@ -72,6 +72,8 @@ class ProductScraped(BaseModel):
     quantity: Optional[float] = None
     quantity_unit: Optional[str] = None
     price_cents: int
+    unit_price_cents: Optional[int] = None   # bijv. 266 = €2,66 per 100ml
+    unit_label: Optional[str] = None         # bijv. "per 100ml"
     original_price_cents: Optional[int] = None
     promotion: Optional["PromoScraped"] = None
 

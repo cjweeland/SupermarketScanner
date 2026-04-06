@@ -157,3 +157,48 @@ def format_unit_price(unit_price_cents: int, unit_label: str) -> str:
     """Geeft bijv. '€1,60 per 100g' terug."""
     euros = unit_price_cents / 100
     return f"€{euros:,.2f} {unit_label}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def parse_pgkgprice(text: str) -> tuple[Optional[int], Optional[str]]:
+    """
+    Parst de pgkgprice-tekst van supermarktscanner.nl naar (unit_price_cents, unit_label).
+
+    Voorbeelden:
+      "(26.60/liter)"  → (266, "per 100ml")
+      "(2.66/100ml)"   → (266, "per 100ml")
+      "(4.50/100g)"    → (450, "per 100g")
+      "(3.45/kg)"      → (35,  "per 100g")
+      "(1.20/stuk)"    → (120, "per stuk")
+    """
+    if not text:
+        return None, None
+    # Haal getal en eenheid op uit "(getal/eenheid)"
+    cleaned = text.strip("() \n\t").replace(",", ".")
+    m = re.match(r"([\d.]+)\s*/\s*(.+)", cleaned)
+    if not m:
+        return None, None
+    try:
+        euros = float(m.group(1))
+    except ValueError:
+        return None, None
+    unit = m.group(2).lower().strip().rstrip(".")
+
+    if unit in ("liter", "l", "litre", "ltr"):
+        # per liter → per 100ml: euros * 100cents / 10
+        return round(euros * 10), "per 100ml"
+    elif unit in ("kg", "kilogram", "kilo"):
+        # per kg → per 100g
+        return round(euros * 10), "per 100g"
+    elif unit in ("100ml", "100 ml"):
+        return round(euros * 100), "per 100ml"
+    elif unit in ("100g", "100 g", "100gr", "100gram"):
+        return round(euros * 100), "per 100g"
+    elif unit in ("ml", "milliliter", "millilitre"):
+        return round(euros * 100 * 100), "per 100ml"
+    elif unit in ("g", "gr", "gram"):
+        return round(euros * 100 * 100), "per 100g"
+    elif unit in ("stuk", "stuks", "st", "piece", "pieces"):
+        return round(euros * 100), "per stuk"
+    elif unit in ("rol", "rollen", "roll", "rolls"):
+        return round(euros * 100), "per rol"
+    return None, None

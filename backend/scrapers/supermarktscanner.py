@@ -153,10 +153,13 @@ class SupermarktScannerScraper(BaseScraper):
         """
         results = []
 
+        from services.unit_normalizer import parse_pgkgprice
+
         for entry in soup.find_all(class_="product-entry"):
-            name = entry.get("data-name", "").strip()
-            if not name:
+            raw_name = entry.get("data-name", "").strip()
+            if not raw_name:
                 continue
+            name = self._clean_product_name(raw_name)
 
             for item in entry.find_all(class_="cbp-pgitem"):
                 # Winkelnaam uit logo-afbeelding: /img/shops_logo/hoogvliet_tag.png
@@ -164,7 +167,6 @@ class SupermarktScannerScraper(BaseScraper):
                 if not logo_img:
                     continue
                 src = logo_img.get("src", "")
-                # Haal winkelnaam uit bestandsnaam: "hoogvliet_tag.png" → "hoogvliet"
                 shop_raw = re.sub(r"_tag\.png.*", "", src.split("/")[-1])
                 store_slug = self._map_store_name(shop_raw)
                 if not store_slug:
@@ -177,16 +179,33 @@ class SupermarktScannerScraper(BaseScraper):
                 if price_cents <= 0:
                     continue
 
+                # Eenheidsprijs uit pgkgprice: "(26.60/liter)"
+                unit_price_cents, unit_label = None, None
+                kgprice_el = item.find(class_="pgkgprice")
+                if kgprice_el:
+                    unit_price_cents, unit_label = parse_pgkgprice(
+                        kgprice_el.get_text(strip=True)
+                    )
+
                 results.append(ProductScraped(
                     store_slug=store_slug,
                     store_product_id=f"{name[:40]}_{store_slug}",
                     name=name.title(),
                     category_slug=category_slug,
                     price_cents=price_cents,
+                    unit_price_cents=unit_price_cents,
+                    unit_label=unit_label,
                     url=f"{BASE_URL}/product.php?keyword={quote_plus(query)}",
                 ))
 
         return results
+
+    def _clean_product_name(self, name: str) -> str:
+        """Verwijder promotiesuffixen zoals 'vandaag', 'vanaf 7 apr' uit naam."""
+        # "sprayvandaag" → "spray", "rollervanaf 7 apr" → "roller"
+        name = re.sub(r"vandaag\s*$", "", name, flags=re.IGNORECASE).strip()
+        name = re.sub(r"vanaf\s+\d+\s+\w+\s*$", "", name, flags=re.IGNORECASE).strip()
+        return name
 
     def _extract_store_prices_from_jsonld(
         self, item: dict

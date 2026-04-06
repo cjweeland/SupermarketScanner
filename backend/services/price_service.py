@@ -70,10 +70,13 @@ async def upsert_product(db: AsyncSession, scraped, store_id: int) -> None:
             product.normalized_unit = normalized.base_unit
         product.updated_at = datetime.utcnow()
 
-    # Eenheidsprijs berekenen
+    # Eenheidsprijs: gebruik gescrapede waarde, anders berekenen uit hoeveelheid
     unit_price_cents = None
     unit_label = None
-    if normalized and scraped.price_cents > 0:
+    if scraped.unit_price_cents and scraped.unit_price_cents > 0:
+        unit_price_cents = scraped.unit_price_cents
+        unit_label = scraped.unit_label
+    elif normalized and scraped.price_cents > 0:
         unit_price_cents, unit_label = compute_unit_price(scraped.price_cents, normalized)
 
     # Prijs snapshot
@@ -203,8 +206,6 @@ async def compare_products(
 
             # Versheid check
             cache_ttl = timedelta(hours=settings.cache_ttl_supermarket_hours)
-            if store_info.get("type") == "drugstore":
-                cache_ttl = timedelta(hours=settings.cache_ttl_drugstore_hours)
             is_stale = latest_snapshot.captured_at < datetime.utcnow() - cache_ttl
 
             prices_out.append(StorePriceOut(
